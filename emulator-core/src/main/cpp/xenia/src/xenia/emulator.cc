@@ -17,6 +17,14 @@
 #endif
 #if XE_PLATFORM_xendroid
 #include <queue>
+#include <thread>
+
+#if XE_PLATFORM_LINUX
+#include <dirent.h>
+#include <cstdlib>
+#include <sched.h>
+#include <unistd.h>
+#endif
 #endif
 #include "config.h"
 #include "third_party/fmt/include/fmt/format.h"
@@ -113,6 +121,13 @@ DEFINE_CVar(launch_data, "",
             "Used internally for title-to-title launches.",
             "General", true, std::string);
 
+DEFINE_int32(boot_single_core_seconds, 0,
+             "Pin every emulator thread to a single CPU core for this many "
+             "seconds after the title launches, then release them to all "
+             "cores. Works around titles whose boot races between threads "
+             "(e.g. Fight Night Champion). 0 disables.",
+             "General");
+
 DEFINE_bool(dump_xex, false, "Dump the main XEX to current directory on launch",
             "General");
 
@@ -151,6 +166,53 @@ DECLARE_int32(console_type);
 
 namespace xe {
 using namespace xe::literals;
+
+#if XE_PLATFORM_LINUX
+namespace {
+
+void SetAllThreadsAffinity(const cpu_set_t& set) {
+  DIR* dir = opendir("/proc/self/task");
+  if (!dir) {
+    return;
+  }
+  while (dirent* entry = readdir(dir)) {
+    int tid = atoi(entry->d_name);
+    if (tid > 0) {
+      sched_setaffinity(tid, sizeof(set), &set);
+    }
+  }
+  closedir(dir);
+}
+
+void PinBootToSingleCore(int seconds) {
+  long cpus = sysconf(_SC_NPROCESSORS_CONF);
+  if (seconds <= 0 || cpus <= 1) {
+    return;
+  }
+  cpu_set_t single;
+  CPU_ZERO(&single);
+  CPU_SET(cpus - 1, &single);
+  SetAllThreadsAffinity(single);
+  XELOGI("boot_single_core_seconds: pinned all threads to CPU {} for {}s",
+         cpus - 1, seconds);
+
+  std::thread([seconds, cpus]() {
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    cpu_set_t all;
+    CPU_ZERO(&all);
+    for (long i = 0; i < cpus; ++i) {
+      CPU_SET(i, &all);
+    }
+    for (int pass = 0; pass < 3; ++pass) {
+      SetAllThreadsAffinity(all);
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    XELOGI("boot_single_core_seconds: released all threads to {} CPUs", cpus);
+  }).detach();
+}
+
+}  // namespace
+#endif
 
 Emulator::Emulator(const std::filesystem::path& command_line,
                    const std::filesystem::path& storage_root,
@@ -2608,6 +2670,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         cache_root_, title_id_.value(), false,
         [this]() { on_shader_storage_initialization(false); });
   }
+
+#if XE_PLATFORM_LINUX
+  PinBootToSingleCore(cvars::boot_single_core_seconds);
+#endif
 
   auto main_thread = kernel_state_->LaunchModule(module);
   if (!main_thread) {
