@@ -38,6 +38,9 @@ static const Quirk kQuirks[] = {
     {0x49470804, "network_enabled", false, "hangs on a blocking recvfrom"},
     {0x4E4D083A, "spirv_multiply_zero_test_on_bits", true,
      "ir3 cannot compile fmadz"},
+    {0x45410915, "boot_single_core_seconds", int64_t(60),
+     "null read at 0x82E3E5B8 from a boot race on the intro transition"},
+    {0x45410915, "mount_cache", true, "replays and asset cache use cache:"},
 };
 
 // Same path/priority as a per-game config file.
